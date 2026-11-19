@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Read My Text</title>
+<style>
+:root{
+  --bg:#faf7f1; --fg:#24211d; --muted:#6f695f; --rule:#e5ded1; --card:#f1ece2;
+  --hl:#ffe7a3; --hover:rgba(255,215,110,.28); --accent:#8b4a1c; --accent-fg:#fff;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#161513; --fg:#ebe6dc; --muted:#a29b8f; --rule:#34302a; --card:#201e1a;
+    --hl:#5c4815; --hover:rgba(240,190,80,.16); --accent:#e3a56c; --accent-fg:#1a1208;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:19px/1.7 Georgia,serif}
+main{max-width:680px;margin:0 auto;padding:48px 24px 200px}
+h1{font-size:34px;line-height:1.2;text-align:center;margin:0 0 20px}
+p{margin:0 0 1.1em}
+button,select,input,textarea{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.actions,.textbtn,.bar{font:15px/1.4 system-ui,sans-serif}
+
+/* paste screen */
+body.pasting #reader, body.pasting .bar{display:none}
+body:not(.pasting) #paste{display:none}
+textarea{display:block;width:100%;min-height:46vh;resize:vertical;font-size:16px;line-height:1.6;background:var(--card);border:1px solid var(--rule);border-radius:10px;padding:14px 16px}
+textarea::placeholder{color:var(--muted)}
+.actions{text-align:center;margin-top:16px}
+.btn{border:0;border-radius:999px;background:var(--accent);color:var(--accent-fg);padding:11px 24px;font-weight:600;cursor:pointer}
+
+/* reader */
+.textbtn{border:0;background:none;color:var(--accent);cursor:pointer;padding:4px 0;margin:0 0 32px}
+.s{cursor:pointer;border-radius:4px;padding:2px 1px;margin:0 -1px;box-decoration-break:clone}
+.s:hover{background:var(--hover)}
+.s.on{background:var(--hl)}
+
+/* control bar */
+.bar{position:fixed;left:0;right:0;bottom:0;background:var(--bg);border-top:1px solid var(--rule);box-shadow:0 -6px 24px rgba(0,0,0,.08)}
+.bar-inner{max-width:680px;margin:0 auto;padding:12px 24px;display:flex;flex-wrap:wrap;align-items:center;gap:12px 24px}
+.play{width:52px;height:52px;border-radius:50%;border:0;background:var(--accent);color:var(--accent-fg);display:grid;place-items:center;cursor:pointer}
+.field{display:flex;align-items:center;gap:8px;color:var(--muted)}
+.field input{width:110px;accent-color:var(--accent)}
+.field output{color:var(--fg)}
+select{color:var(--fg);background:var(--bg);border:1px solid var(--rule);border-radius:6px;padding:6px 8px;max-width:260px}
+.error{flex-basis:100%;color:var(--accent)}
+.error:empty{display:none}
+</style>
+</head>
+<body class="pasting">
+<main>
+  <section id="paste">
+    <h1>Read My Text</h1>
+    <textarea id="input" placeholder="Paste your text here…" aria-label="Text to read aloud" autofocus></textarea>
+    <div class="actions"><button class="btn" id="go" type="button">Read</button></div>
+  </section>
+
+  <div id="reader">
+    <button class="textbtn" id="edit" type="button">← Edit text</button>
+    <article id="text"></article>
+  </div>
+</main>
+
+<div class="bar" id="bar">
+  <div class="bar-inner">
+    <button class="play" id="play" type="button" aria-label="Play" title="Play / pause (Space)">
+      <svg id="icoPlay" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.2v13.6a.6.6 0 0 0 .92.5l10.4-6.8a.6.6 0 0 0 0-1L8.92 4.7A.6.6 0 0 0 8 5.2z"/></svg>
+      <svg id="icoPause" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="display:none"><rect x="6" y="5" width="4.2" height="14" rx="1"/><rect x="13.8" y="5" width="4.2" height="14" rx="1"/></svg>
+    </button>
+    <label class="field">Speed <input type="range" id="rate" min="0.5" max="3" step="0.1"><output id="rateOut"></output></label>
+    <label class="field">Voice <select id="voice"></select></label>
+    <span class="error" id="error" role="status"></span>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+/* =====================================================================
+   Turning pasted text into paragraphs and sentences
+   ===================================================================== */
+
+// Every line is a paragraph. Blank lines are skipped.
+function paragraphs(text){
+  return text.split(/\r\n?|\n/).map(line => line.trim()).filter(Boolean);
+}
+
+// Abbreviations whose full stop doesn't end a sentence: "Dr. Smith", "et al. (2001)".
+const ABBREVIATIONS = new Set(['mr', 'mrs', 'ms', 'dr', 'prof', 'st', 'al', 'vs', 'cf', 'approx']);
+// Abbreviations whose full stop doesn't end a sentence when a number follows: "Fig. 2", "p. 14".
+const BEFORE_NUMBER = new Set(['fig', 'figs', 'no', 'nos', 'p', 'pp', 'vol', 'ch', 'eq']);
+
+// A sentence ends at . ! ? or … (and any closing quotes or brackets straight after it),
+// followed by a space, unless the next word starts with a lowercase letter
+// ("“What?” she asked.", "e.g. apples") or the full stop belongs to an abbreviation.
+function splitSentences(paragraph){
+  const sentences = [];
+  for (const piece of paragraph.split(/(?<=[.!?…]["”’'»)\]]*)\s+(?!\p{Ll})/u)){
+    if (sentences.length && endsWithAbbreviation(sentences.at(-1), piece)){
+      sentences[sentences.length - 1] += ' ' + piece;
+    } else {
+      sentences.push(piece);
+    }
+  }
+  return sentences;
+}
+
+// Is the full stop at the end of `sentence` part of an abbreviation, given the `next` piece of text?
+function endsWithAbbreviation(sentence, next){
+  if (/^\d+\.$/.test(sentence)) return true;                   // a list number: "1. First item"
+  const word = sentence.split(/\s/).pop().replace(/^["“‘'(\[]+/, '');
+  if (!/[^.]\.$/.test(word)) return false;                       // doesn't end in a single full stop
+  const w = word.slice(0, -1);
+  return ABBREVIATIONS.has(w.toLowerCase()) ||
+    (BEFORE_NUMBER.has(w.toLowerCase()) && /^\d/.test(next)) ||  // "Fig. 2"
+    /^\p{Lu}$/u.test(w) ||                                        // an initial: "J. R. R. Tolkien"
+    /\p{L}\.\p{L}/u.test(w);                                      // dots inside: "U.S.", "i.e."
+}
+
+/* =====================================================================
+   The page
+   ===================================================================== */
+const byId = id => document.getElementById(id);
+const article = byId('text'), input = byId('input'), bar = byId('bar'), errorMsg = byId('error');
+const playBtn = byId('play'), icoPlay = byId('icoPlay'), icoPause = byId('icoPause');
+const rateIn = byId('rate'), rateOut = byId('rateOut'), voiceSel = byId('voice');
+const synth = window.speechSynthesis;
+
+let sentences = [];          // every sentence's <span>, in reading order
+let idx = 0;                 // the sentence being read, or to be read next
+let playing = false;
+let token = 0;               // bumped whenever speech is cancelled, so callbacks from old speech do nothing
+// Chromium can garbage-collect an utterance that nothing in the page refers to while it is
+// still being spoken; its onend then never fires and reading silently stops. Holding on to
+// the current one here prevents that. It is never read.
+let currentUtterance = null;
+
+function build(text){
+  sentences = [];
+  article.textContent = '';
+  for (const paragraph of paragraphs(text)){
+    const p = document.createElement('p');
+    splitSentences(paragraph).forEach((sentence, j) => {
+      if (j) p.append(' ');
+      const span = document.createElement('span');
+      span.className = 's';
+      span.textContent = sentence;
+      span.dataset.i = sentences.length;
+      p.append(span);
+      sentences.push(span);
+    });
+    article.append(p);
+  }
+}
+
+/* ---------- settings: only speed and voice are remembered, never the text ---------- */
+const SETTINGS_KEY = 'read-my-text-settings';
+let rate = 1, voiceURI = '';
+try {
+  const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {};
+  rate = saved.rate || 1;
+  voiceURI = saved.voiceURI || '';
+} catch (e) {}
+
+function save(){
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify({rate, voiceURI})); } catch (e) {}
+}
+
+/* ---------- voices ---------- */
+// Every voice, grouped by language, with the visitor's own language first and the others in
+// alphabetical order. Within a language, the voices that need the internet (Edge's natural
+// voices, the best ones) come first, and voices from the visitor's own region come before
+// the rest, so a British visitor's default voice is a British natural voice.
+let voices = [];
+const languageNames = new Intl.DisplayNames([navigator.language], {type: 'language'});
+const languageCode = lang => lang.split('-')[0];
+const myLanguage = languageCode(navigator.language);
+
+function loadVoices(){
+  const language = v => languageNames.of(languageCode(v.lang));
+  voices = synth.getVoices().slice().sort((a, b) =>
+    (languageCode(b.lang) === myLanguage) - (languageCode(a.lang) === myLanguage) ||
+    language(a).localeCompare(language(b)) ||
+    a.localService - b.localService ||
+    (b.lang === navigator.language) - (a.lang === navigator.language) ||
+    a.name.localeCompare(b.name));
+
+  const groups = new Map();
+  voices.forEach((v, i) => {
+    const heading = `${language(v)} (${v.localService ? 'no internet required' : 'internet required'})`;
+    if (!groups.has(heading)){
+      const group = document.createElement('optgroup');
+      group.label = heading;
+      groups.set(heading, group);
+    }
+    groups.get(heading).append(new Option(v.name.replace(/^Microsoft /, '').replace(' Online (Natural)', ''), i));
+  });
+  voiceSel.replaceChildren(...groups.values());
+  voiceSel.value = Math.max(0, voices.findIndex(v => v.voiceURI === voiceURI));
+}
+
+/* ---------- speaking ---------- */
+function speakFrom(i, t){
+  if (t !== token) return;
+  if (i >= sentences.length){ finish(); return; }
+  idx = i;
+  highlight(i);
+  const u = new SpeechSynthesisUtterance(sentences[i].textContent);
+  const voice = voices[voiceSel.value];
+  if (voice) u.voice = voice;
+  u.rate = rate;
+  u.onend = () => speakFrom(i + 1, t);
+  u.onerror = () => {
+    if (t !== token) return;
+    pause();
+    errorMsg.textContent = "Couldn't read this sentence. If you're offline, choose a voice marked “no internet required”.";
+  };
+  currentUtterance = u;
+  synth.speak(u);
+}
+
+function play(from = idx){
+  const t = ++token;
+  synth.cancel();
+  playing = true;
+  errorMsg.textContent = '';
+  updateButton();
+  speakFrom(from, t);
+}
+
+// Pausing stops the speech; playing again starts the current sentence from its beginning.
+function pause(){
+  token++;
+  synth.cancel();
+  playing = false;
+  updateButton();
+}
+
+function finish(){
+  playing = false;
+  updateButton();
+  clearHighlight();
+  idx = 0;
+}
+
+function step(dir){
+  const i = Math.min(Math.max(idx + dir, 0), sentences.length - 1);
+  if (i === idx) return;
+  if (playing) play(i);
+  else { idx = i; highlight(i); }
+}
+
+/* ---------- interface ---------- */
+function updateButton(){
+  icoPlay.style.display = playing ? 'none' : '';
+  icoPause.style.display = playing ? '' : 'none';
+  playBtn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+}
+
+function clearHighlight(){
+  const on = article.querySelector('.on');
+  if (on) on.classList.remove('on');
+}
+
+// Highlight a sentence, scrolling to it if it's off screen or hidden behind the control bar.
+function highlight(i){
+  clearHighlight();
+  const el = sentences[i];
+  el.classList.add('on');
+  const r = el.getBoundingClientRect();
+  if (r.top < 60 || r.bottom > window.innerHeight - bar.offsetHeight - 30){
+    el.scrollIntoView({block: 'center', behavior: 'smooth'});
+  }
+}
+
+function showRate(){ rateOut.textContent = rate.toFixed(1) + '×'; }
+
+function showPaste(){
+  if (playing) pause();
+  document.body.classList.add('pasting');
+  window.scrollTo(0, 0);
+  input.focus();
+}
+
+function read(){
+  const text = input.value;
+  if (!text.trim()) return;
+  build(text);
+  document.body.classList.remove('pasting');
+  window.scrollTo(0, 0);
+  play(0);
+}
+
+/* ---------- wiring ---------- */
+byId('go').addEventListener('click', read);
+byId('edit').addEventListener('click', showPaste);
+playBtn.addEventListener('click', () => playing ? pause() : play());
+
+// Clicking a sentence reads from there, unless the click was to select some text.
+article.addEventListener('click', e => {
+  const s = e.target.closest('.s');
+  if (s && !window.getSelection().toString()) play(+s.dataset.i);
+});
+
+rateIn.value = rate;
+showRate();
+rateIn.addEventListener('input', () => { rate = +rateIn.value; showRate(); });
+rateIn.addEventListener('change', () => { save(); if (playing) play(); });
+
+voiceSel.addEventListener('change', () => {
+  voiceURI = voices[voiceSel.value].voiceURI;
+  save();
+  if (playing) play();
+});
+synth.addEventListener('voiceschanged', loadVoices);
+loadVoices();
+
+// Space plays and pauses; the left and right arrow keys move between sentences.
+document.addEventListener('keydown', e => {
+  if (document.body.classList.contains('pasting') || e.metaKey || e.ctrlKey || e.altKey) return;
+  const tag = e.target.tagName;
+  if (e.key === ' ' && tag !== 'BUTTON'){ e.preventDefault(); playing ? pause() : play(); return; }
+  if (tag === 'INPUT' || tag === 'SELECT') return; // let the speed and voice controls use the arrow keys
+  if (e.key === 'ArrowRight'){ e.preventDefault(); step(1); }
+  if (e.key === 'ArrowLeft'){ e.preventDefault(); step(-1); }
+});
+
+// Otherwise the browser can keep talking after the page is closed or reloaded.
+window.addEventListener('pagehide', pause);
+</script>
+</body>
+</html>

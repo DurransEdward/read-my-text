@@ -1,0 +1,5 @@
+# Personal scratch files: anything with __delete__ in its name
+*__delete__*
+
+# Folder settings that macOS Finder creates
+.DS_Store
